@@ -1,7 +1,7 @@
 {
   "name": "telegram-bot",
   "version": "1.0.0",
-  "description": "Telegram Bot on Render",
+  "description": "Telegram Bot on Render with file-based storage and buttons",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
