@@ -80,8 +80,12 @@ async function handleUserInput(chatId, text) {
     await sendMessage(chatId, "Укажите количество:");
   } else if (user.step === 'askQuantity') {
     user.quantity = text;
-    await writeToSheet(user);
-    await sendMessage(chatId, "✅ Данные записаны! Спасибо!");
+    const success = await writeToSheet(user);
+    if (success) {
+      await sendMessage(chatId, "✅ Данные записаны! Спасибо!");
+    } else {
+      await sendMessage(chatId, "❌ Ошибка при записи данных! Попробуйте снова позже.");
+    }
     delete userState[chatId];
   }
 }
@@ -110,24 +114,33 @@ async function getFormsAndSizes(order) {
 }
 
 async function writeToSheet(user) {
-  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: SHEET_NAME });
-  const rows = res.data.values;
+  try {
+    const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: SHEET_NAME });
+    const rows = res.data.values;
 
-  for (let i = 1; i < rows.length; i++) {
-    if (rows[i][0] === user.order && rows[i][1] === user.form && rows[i][2] === user.size) {
-      const range = `${SHEET_NAME}!E${i + 1}:G${i + 1}`; // теперь до G
-      const date = new Date();
-      const formattedDate = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: SPREADSHEET_ID,
-        range: range,
-        valueInputOption: 'RAW',
-        requestBody: {
-          values: [[user.quantity, formattedDate, user.name]]
-        }
-      });
-      return;
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][0] === user.order && rows[i][1] === user.form && rows[i][2] === user.size) {
+        const range = `${SHEET_NAME}!E${i + 1}:G${i + 1}`;
+        const date = new Date();
+        const formattedDate = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: SPREADSHEET_ID,
+          range: range,
+          valueInputOption: 'RAW',
+          requestBody: {
+            values: [[user.quantity, formattedDate, user.name]]
+          }
+        });
+        console.log(`✅ Данные успешно записаны в строку ${i + 1}`);
+        return true;
+      }
     }
+
+    console.error('❗Не найдена строка для записи данных.');
+    return false;
+  } catch (error) {
+    console.error('❌ Ошибка при записи в Google Sheets:', error.message);
+    return false;
   }
 }
 
