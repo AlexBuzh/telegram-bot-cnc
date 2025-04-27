@@ -1,4 +1,4 @@
-// index.js
+// Новый index.js под обновлённую логику
 
 const express = require('express');
 const bodyParser = require('body-parser');
@@ -77,18 +77,32 @@ async function handleUserInput(chatId, text) {
       return;
     }
     const buttons = formsAndSizes.map(item => [{ text: `${item.form} - ${item.size}`, callback_data: `${item.form}|${item.size}` }]);
+    user.availableForms = formsAndSizes;
     await sendMessage(chatId, "Выберите форму и размер:", buttons);
   } else if (user.step === 'chooseFormSize') {
     const [form, size] = text.split('|');
+    const selected = user.availableForms.find(f => f.form === form && f.size === size);
+    if (!selected) {
+      await sendMessage(chatId, "Неверный выбор. Пожалуйста, выберите форму и размер из списка.");
+      return;
+    }
     user.form = form;
     user.size = size;
-    user.step = 'askQuantity';
-    await sendMessage(chatId, "Укажите количество:");
-  } else if (user.step === 'askQuantity') {
-    user.quantity = text;
-    await writeToSheet(user);
-    await sendMessage(chatId, "\u2705 Данные записаны! Спасибо!");
-    delete userState[chatId];
+    user.requiredAmount = selected.required;
+
+    user.step = 'chooseQuantity';
+    const quantityOptions = Array.from({ length: selected.required }, (_, i) => [{ text: `${i + 1}`, callback_data: `qty_${i + 1}` }]);
+    await sendMessage(chatId, "Выберите количество для выполнения:", quantityOptions);
+  } else if (user.step === 'chooseQuantity') {
+    if (text.startsWith('qty_')) {
+      const quantity = parseInt(text.replace('qty_', ''), 10);
+      user.quantity = quantity;
+      await writeToSheet(user);
+      await sendMessage(chatId, "\u2705 Данные записаны! Спасибо!");
+      delete userState[chatId];
+    } else {
+      await sendMessage(chatId, "Пожалуйста, выберите количество из предложенных вариантов.");
+    }
   }
 }
 
@@ -114,11 +128,10 @@ async function getFormsAndSizes(order) {
   return rows.slice(1)
     .filter(r => r[0] === order)
     .filter(r => {
-      const required = parseInt(r[3], 10) || 0;
-      const done = parseInt(r[4], 10) || 0;
-      return done < required;
+      const required = parseInt(r[4], 10) || 0; // Требуется еще (новый столбец E)
+      return required > 0;
     })
-    .map(r => ({ form: r[1], size: r[2] }));
+    .map(r => ({ form: r[1], size: r[2], required: parseInt(r[4], 10) }));
 }
 
 async function writeToSheet(user) {
@@ -127,15 +140,20 @@ async function writeToSheet(user) {
 
   for (let i = 1; i < rows.length; i++) {
     if (rows[i][0] === user.order && rows[i][1] === user.form && rows[i][2] === user.size) {
-      const range = `${SHEET_NAME}!E${i + 1}:G${i + 1}`;
+      const doneSoFar = parseInt(rows[i][5], 10) || 0;
+      const newDone = doneSoFar + user.quantity;
+      const requiredTotal = parseInt(rows[i][3], 10) || 0;
+      const requiredLeft = Math.max(requiredTotal - newDone, 0);
       const date = new Date();
       const formattedDate = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
+
+      const range = `${SHEET_NAME}!E${i + 1}:H${i + 1}`;
       await sheets.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
         range: range,
         valueInputOption: 'RAW',
         requestBody: {
-          values: [[user.quantity, formattedDate, user.name]]
+          values: [[requiredLeft, newDone, formattedDate, user.name]]
         }
       });
       return;
