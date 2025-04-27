@@ -3,111 +3,119 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { GoogleSpreadsheet } from 'google-spreadsheet';
 import express from 'express';
-import dotenv from 'dotenv';
+import 'dotenv/config';
 
-dotenv.config();
-
-const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
 const app = express();
 const port = process.env.PORT || 3000;
 
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+
+// Подключение к Google таблице
 const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID);
+await doc.useServiceAccountAuth({
+  client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+  private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+});
+await doc.loadInfo();
+const sheet = doc.sheetsByTitle[process.env.SHEET_NAME];
 
-async function accessSpreadsheet() {
-  try {
-    await doc.useServiceAccountAuth({
-      client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-      private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-    });
-    await doc.loadInfo();
-    console.log('Таблица успешно загружена.');
-  } catch (error) {
-    console.error('Ошибка при доступе к таблице:', error);
-  }
-}
+console.log('Таблица успешно загружена.');
 
-accessSpreadsheet();
+// Хранилище сессий
+const sessions = new Map();
 
-const userStates = {};
+// Время ожидания ответа
+const TIMEOUT_MS = 30000;
 
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
-  userStates[chatId] = { step: 'askName' };
+  sessions.set(chatId, { step: 'waiting_for_name' });
 
   await bot.sendMessage(chatId, 'Привет! Как тебя зовут?');
+
+  setTimeout(() => {
+    const session = sessions.get(chatId);
+    if (session && session.step === 'waiting_for_name') {
+      bot.sendMessage(chatId, `${session.name || 'Пользователь'}, вы не ответили. Сеанс завершен. Нажмите /start для нового начала.`);
+      sessions.delete(chatId);
+    }
+  }, TIMEOUT_MS);
 });
 
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
-  const userState = userStates[chatId];
+  const session = sessions.get(chatId);
 
-  if (!userState) return;
+  if (!session) return;
 
-  if (userState.step === 'askName' && msg.text !== '/start') {
-    userState.name = msg.text;
-    userState.step = 'selectOrder';
+  if (session.step === 'waiting_for_name' && msg.text !== '/start') {
+    session.name = msg.text;
+    session.step = 'waiting_for_order';
 
-    try {
-      const sheet = doc.sheetsByTitle[process.env.SHEET_NAME];
-      if (!sheet) {
-        await bot.sendMessage(chatId, 'Ошибка: лист с заказами не найден.');
-        return;
-      }
+    const rows = await sheet.getRows();
+    const availableOrders = rows
+      .map((row, index) => ({
+        index: index + 1,
+        order: row['Заказ'],
+        shape: row['Форма'],
+        size: row['Размер'],
+        required: row['Требуется'],
+        done: row['Сделано'],
+      }))
+      .filter((row) => !row.done || row.done === '0');
 
-      const rows = await sheet.getRows();
-      const availableOrders = rows.filter(row => {
-        const required = parseInt(row['Требуется']);
-        const done = parseInt(row['Сделано'] || '0');
-        return required > done;
-      });
-
-      if (availableOrders.length === 0) {
-        await bot.sendMessage(chatId, 'Нет доступных заказов.');
-        return;
-      }
-
-      let ordersText = 'Доступные заказы:\n';
-      availableOrders.forEach((order, index) => {
-        ordersText += `\n#${index + 1}\nЗаказ: ${order['Заказ']}\nФорма: ${order['Форма']}\nРазмер: ${order['Размер']}\nТребуется: ${order['Требуется']}\n`;
-      });
-
-      await bot.sendMessage(chatId, ordersText);
-      await bot.sendMessage(chatId, 'Пожалуйста, выбери номер заказа.');
-
-      userState.orders = availableOrders;
-      userState.step = 'chooseOrder';
-
-      // Таймер на 30 секунд
-      userState.timeout = setTimeout(() => {
-        if (userStates[chatId]?.step === 'chooseOrder') {
-          bot.sendMessage(chatId, `${userState.name}, вы не ответили. Сеанс завершен. Нажмите /start чтобы начать снова.`);
-          delete userStates[chatId];
-        }
-      }, 30000);
-
-    } catch (error) {
-      console.error('Ошибка при получении заказов:', error);
-      await bot.sendMessage(chatId, 'Ошибка при получении заказов. Попробуйте позже.');
-    }
-  } else if (userState.step === 'chooseOrder') {
-    clearTimeout(userState.timeout);
-
-    const choice = parseInt(msg.text);
-    if (!choice || choice < 1 || choice > userState.orders.length) {
-      await bot.sendMessage(chatId, 'Пожалуйста, выбери правильный номер заказа.');
+    if (availableOrders.length === 0) {
+      await bot.sendMessage(chatId, 'Нет доступных заказов.');
+      sessions.delete(chatId);
       return;
     }
 
-    const selectedOrder = userState.orders[choice - 1];
+    const buttons = availableOrders.map((order) => ([{
+      text: `#${order.index} ${order.shape} (${order.size})`,
+      callback_data: String(order.index),
+    }]));
 
-    await bot.sendMessage(chatId, `Вы выбрали заказ:\nЗаказ: ${selectedOrder['Заказ']}\nФорма: ${selectedOrder['Форма']}\nРазмер: ${selectedOrder['Размер']}\n`);
+    session.availableOrders = availableOrders;
 
-    delete userStates[chatId];
+    await bot.sendMessage(chatId, 'Выбери заказ:', {
+      reply_markup: {
+        inline_keyboard: buttons,
+      },
+    });
+
+    setTimeout(() => {
+      const session = sessions.get(chatId);
+      if (session && session.step === 'waiting_for_order') {
+        bot.sendMessage(chatId, `${session.name}, вы не выбрали заказ. Сеанс завершен. Нажмите /start для нового начала.`);
+        sessions.delete(chatId);
+      }
+    }, TIMEOUT_MS);
   }
 });
 
+bot.on('callback_query', async (query) => {
+  const chatId = query.message.chat.id;
+  const session = sessions.get(chatId);
+
+  if (!session) return;
+
+  if (session.step === 'waiting_for_order') {
+    const selectedOrder = session.availableOrders.find((o) => String(o.index) === query.data);
+
+    if (!selectedOrder) {
+      await bot.sendMessage(chatId, 'Выбранный заказ не найден.');
+      return;
+    }
+
+    await bot.sendMessage(chatId, `Вы выбрали заказ ${selectedOrder.order}:\nФорма: ${selectedOrder.shape}\nРазмер: ${selectedOrder.size}\nТребуется: ${selectedOrder.required}`);
+    sessions.delete(chatId);
+  }
+
+  await bot.answerCallbackQuery(query.id);
+});
+
 app.get('/', (req, res) => {
-  res.send('Бот работает.');
+  res.send('Бот запущен');
 });
 
 app.listen(port, () => {
