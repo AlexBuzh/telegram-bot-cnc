@@ -3,8 +3,9 @@ const bodyParser = require('body-parser');
 const axios = require('axios');
 const { google } = require('googleapis');
 
-const TOKEN = process.env.TELEGRAM_TOKEN;
+const TOKEN = '7949948004:AAGmO4r9jJZNlhZwq8qrv8CX3sVq7-ZMDjg'; 
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
+
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const SHEET_NAME = process.env.SHEET_NAME;
 
@@ -23,9 +24,8 @@ const sheets = google.sheets({ version: 'v4', auth });
 
 let userState = {};
 
-// ➡️ Новый маршрут /ping для проверки живости бота
 app.get('/ping', (req, res) => {
-  res.status(200).send('OK');
+  res.send('pong');
 });
 
 app.post('/', async (req, res) => {
@@ -74,7 +74,7 @@ async function handleUserInput(chatId, text) {
   } else if (user.step === 'chooseOrder') {
     user.order = text;
     user.step = 'chooseFormSize';
-    const formsAndSizes = await getFormsAndSizes(user.order);
+    const formsAndSizes = await getAvailableFormsAndSizes(user.order);
     if (formsAndSizes.length === 0) {
       await sendMessage(chatId, "Формы и размеры не найдены для этого заказа. Попробуйте снова.");
       delete userState[chatId];
@@ -87,18 +87,15 @@ async function handleUserInput(chatId, text) {
     user.form = form;
     user.size = size;
     user.step = 'askQuantity';
-    const quantityOptions = await getQuantityOptions(user.order, user.form, user.size);
-    if (quantityOptions.length === 0) {
-      await sendMessage(chatId, "Нет доступных количеств для выбранной формы и размера.");
-      delete userState[chatId];
+    await sendMessage(chatId, "Укажите количество:");
+  } else if (user.step === 'askQuantity') {
+    user.quantity = parseInt(text);
+    if (isNaN(user.quantity) || user.quantity <= 0) {
+      await sendMessage(chatId, "Пожалуйста, укажите корректное число.");
       return;
     }
-    const buttons = quantityOptions.map(q => [{ text: q.toString(), callback_data: q.toString() }]);
-    await sendMessage(chatId, "Выберите количество:", buttons);
-  } else if (user.step === 'askQuantity') {
-    user.quantity = parseInt(text, 10);
     await writeToSheet(user);
-    await sendMessage(chatId, `✅ Записано:\n- Исполнитель: ${user.name}\n- Заказ: ${user.order}\n- Форма: ${user.form}\n- Размер: ${user.size}\n- Количество: ${user.quantity}`);
+    await sendMessage(chatId, `✅ Данные записаны!\n\nИсполнитель: ${user.name}\nЗаказ: ${user.order}\nФорма: ${user.form}\nРазмер: ${user.size}\nКоличество: ${user.quantity}`);
     delete userState[chatId];
   }
 }
@@ -113,68 +110,50 @@ async function sendMessage(chatId, text, buttons = null) {
 
 async function getAvailableOrders() {
   const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: SHEET_NAME });
-  const rows = res.data.values;
-  const orders = new Set();
-  for (let i = 1; i < rows.length; i++) {
-    const requiredMore = parseInt(rows[i][4] || '0', 10);
-    if (requiredMore > 0) {
-      orders.add(rows[i][0]);
-    }
-  }
-  return [...orders];
+  const rows = res.data.values || [];
+  const orders = [...new Set(rows.slice(1)
+    .filter(r => (parseInt(r[4]) || 0) > 0)
+    .map(r => r[0]))];
+  return orders;
 }
 
-async function getFormsAndSizes(order) {
+async function getAvailableFormsAndSizes(order) {
   const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: SHEET_NAME });
-  const rows = res.data.values;
+  const rows = res.data.values || [];
   return rows.slice(1)
-    .filter(r => r[0] === order && parseInt(r[4] || '0', 10) > 0)
+    .filter(r => r[0] === order && (parseInt(r[4]) || 0) > 0)
     .map(r => ({ form: r[1], size: r[2] }));
-}
-
-async function getQuantityOptions(order, form, size) {
-  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: SHEET_NAME });
-  const rows = res.data.values;
-  for (let i = 1; i < rows.length; i++) {
-    if (rows[i][0] === order && rows[i][1] === form && rows[i][2] === size) {
-      const requiredMore = parseInt(rows[i][4] || '0', 10);
-      return Array.from({ length: requiredMore }, (_, idx) => idx + 1);
-    }
-  }
-  return [];
 }
 
 async function writeToSheet(user) {
   const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: SHEET_NAME });
-  const rows = res.data.values;
+  const rows = res.data.values || [];
 
   for (let i = 1; i < rows.length; i++) {
     if (rows[i][0] === user.order && rows[i][1] === user.form && rows[i][2] === user.size) {
-      let required = parseInt(rows[i][3] || '0', 10);
-      let done = parseInt(rows[i][5] || '0', 10);
-      let requiredMore = required - done;
-
-      done += user.quantity;
-      requiredMore = Math.max(0, required - done);
-
-      const range = `${SHEET_NAME}!E${i + 1}:H${i + 1}`;
+      const done = parseInt(rows[i][5] || '0') + user.quantity;
+      const required = parseInt(rows[i][3] || '0');
+      const remaining = Math.max(required - done, 0);
       const date = new Date();
       const formattedDate = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
-
       await sheets.spreadsheets.values.update({
         spreadsheetId: SPREADSHEET_ID,
-        range: range,
+        range: `${SHEET_NAME}!E${i + 1}:H${i + 1}`,
         valueInputOption: 'RAW',
         requestBody: {
-          values: [
-            [requiredMore, done, formattedDate, user.name]
-          ]
+          values: [[remaining, done, formattedDate, user.name]]
         }
       });
-
       return;
     }
   }
 }
+
+// === Авто-пинг каждые 4 минуты ===
+setInterval(() => {
+  axios.get('https://telegram-bot-cnc.onrender.com/ping')
+    .then(() => console.log('Pinged self to stay awake'))
+    .catch((err) => console.error('Error pinging self:', err.message));
+}, 240000); // 4 минуты
 
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
