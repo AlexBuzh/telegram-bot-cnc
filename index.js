@@ -9,7 +9,8 @@ import 'dotenv/config';
 const app = express();
 app.use(bodyParser.json());
 
-const botToken = process.env.BOT_TOKEN;
+const TelegramBot = require('node-telegram-bot-api');
+const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 const serverUrl = process.env.SERVER_URL;
 const spreadsheetId = process.env.SPREADSHEET_ID;
 const sheetName = process.env.SHEET_NAME;
