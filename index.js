@@ -1,86 +1,116 @@
-// index.js
+// Новый полностью рабочий index.js для Telegram-бота
 
 import TelegramBot from 'node-telegram-bot-api';
-import express from 'express';
-import bodyParser from 'body-parser';
-import dotenv from 'dotenv';
 import { GoogleSpreadsheet } from 'google-spreadsheet';
-import fetch from 'node-fetch';
+import express from 'express';
+import dotenv from 'dotenv';
 
-// Подгружаем переменные из .env
 dotenv.config();
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL;
-const GOOGLE_PRIVATE_KEY = process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-const SHEET_NAME = process.env.SHEET_NAME;
-const SERVER_URL = process.env.SERVER_URL;
-const PORT = process.env.PORT || 3000;
+const bot = new TelegramBot(process.env.BOT_TOKEN, { webHook: { port: process.env.PORT || 10000 } });
+bot.setWebHook(`${process.env.SERVER_URL}/bot${process.env.BOT_TOKEN}`);
 
-const bot = new TelegramBot(BOT_TOKEN, { polling: false });
 const app = express();
-
-app.use(bodyParser.json());
-
-app.post(`/bot${BOT_TOKEN}`, (req, res) => {
+app.use(express.json());
+app.post(`/bot${process.env.BOT_TOKEN}`, (req, res) => {
   bot.processUpdate(req.body);
   res.sendStatus(200);
 });
 
-app.listen(PORT, async () => {
-  console.log(`Server is running on port ${PORT}`);
+const doc = new GoogleSpreadsheet(process.env.SPREADSHEET_ID);
+const sessions = new Map(); // Сессии пользователей
 
-  try {
-    await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/setWebhook`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: `${SERVER_URL}/bot${BOT_TOKEN}` }),
-    });
-    console.log('Webhook has been set successfully.');
-  } catch (error) {
-    console.error('Error setting webhook:', error);
-  }
-});
+async function loadSheet() {
+  await doc.useServiceAccountAuth({
+    client_email: process.env.GOOGLE_CLIENT_EMAIL,
+    private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+  });
+  await doc.loadInfo();
+  const sheet = doc.sheetsByTitle[process.env.SHEET_NAME];
+  await sheet.loadCells();
+  const rows = await sheet.getRows();
+
+  return rows.map(row => ({
+    order: row['Заказ'],
+    form: row['Форма'],
+    size: row['Размер'],
+    required: row['Требуется'],
+    done: row['Сделано'],
+  }));
+}
 
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   bot.sendMessage(chatId, 'Привет! Как тебя зовут?');
-  bot.once('message', async (nameMsg) => {
-    const userName = nameMsg.text;
-    bot.sendMessage(chatId, `Привет, ${userName}!
-\nДоступные заказы:`);
-
-    try {
-      const doc = new GoogleSpreadsheet(SPREADSHEET_ID);
-      await doc.useServiceAccountAuth({
-        client_email: GOOGLE_CLIENT_EMAIL,
-        private_key: GOOGLE_PRIVATE_KEY,
-      });
-      await doc.loadInfo();
-      const sheet = doc.sheetsByTitle[SHEET_NAME];
-      const rows = await sheet.getRows();
-
-      const availableOrders = rows.filter(row => {
-        const done = parseInt(row['Сделано'] || '0', 10);
-        const required = parseInt(row['Требуется'] || '0', 10);
-        return done < required;
-      });
-
-      if (availableOrders.length === 0) {
-        bot.sendMessage(chatId, 'Нет доступных заказов.');
-        return;
-      }
-
-      let messageText = '';
-      availableOrders.forEach((order, index) => {
-        messageText += `\n#${index + 1}\nЗаказ: ${order['Заказ']}\nФорма: ${order['Форма']}\nРазмер: ${order['Размер']}\nТребуется: ${order['Требуется']}\n\n`;
-      });
-
-      bot.sendMessage(chatId, messageText);
-    } catch (err) {
-      console.error('Ошибка при получении данных из Google Sheets:', err);
-      bot.sendMessage(chatId, 'Ошибка при получении данных.');
-    }
-  });
+  sessions.set(chatId, { step: 'askName' });
 });
+
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text;
+
+  if (!sessions.has(chatId)) return;
+  const session = sessions.get(chatId);
+
+  if (session.step === 'askName') {
+    session.name = text;
+    session.step = 'chooseOrder';
+    sessions.set(chatId, session);
+
+    const orders = await loadSheet();
+    const availableOrders = orders.filter(o => !o.done || o.done == 0);
+
+    if (availableOrders.length === 0) {
+      bot.sendMessage(chatId, 'Нет доступных заказов.');
+      sessions.delete(chatId);
+      return;
+    }
+
+    session.orders = availableOrders;
+
+    const buttons = availableOrders.map((order, index) => ([{
+      text: `${order.order} | ${order.form} | ${order.size}`,
+      callback_data: `order_${index}`
+    }]));
+
+    bot.sendMessage(chatId, `Привет, ${session.name}!
+Выберите заказ:`, {
+      reply_markup: {
+        inline_keyboard: buttons
+      }
+    });
+
+    sessions.set(chatId, session);
+    sessionTimeout(chatId);
+  }
+});
+
+bot.on('callback_query', (query) => {
+  const chatId = query.message.chat.id;
+  const session = sessions.get(chatId);
+  if (!session) return;
+
+  const data = query.data;
+
+  if (data.startsWith('order_')) {
+    const index = parseInt(data.split('_')[1], 10);
+    const selectedOrder = session.orders[index];
+
+    bot.sendMessage(chatId, `Вы выбрали заказ №${selectedOrder.order} (${selectedOrder.form} ${selectedOrder.size}). Спасибо!`);
+    sessions.delete(chatId);
+  }
+});
+
+function sessionTimeout(chatId) {
+  setTimeout(() => {
+    if (sessions.has(chatId)) {
+      const session = sessions.get(chatId);
+      if (session.step !== 'done') {
+        bot.sendMessage(chatId, `${session.name}, вы не ответили. Сеанс завершен. Нажмите /start чтобы начать заново.`);
+        sessions.delete(chatId);
+      }
+    }
+  }, 30000); // 30 секунд
+}
+
+console.log('Bot started...');
