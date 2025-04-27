@@ -115,7 +115,7 @@ async function writeToSheet(user) {
 
   for (let i = 1; i < rows.length; i++) {
     if (rows[i][0] === user.order && rows[i][1] === user.form && rows[i][2] === user.size) {
-      const range = `${SHEET_NAME}!E${i + 1}:G${i + 1}`;
+      const range = `${SHEET_NAME}!E${i + 1}:G${i + 1}`; // теперь до G
       const date = new Date();
       const formattedDate = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
       await sheets.spreadsheets.values.update({
@@ -123,7 +123,7 @@ async function writeToSheet(user) {
         range: range,
         valueInputOption: 'RAW',
         requestBody: {
-          values: [[user.quantity, formattedDate, "", user.name]]
+          values: [[user.quantity, formattedDate, user.name]]
         }
       });
       return;
