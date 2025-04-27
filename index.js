@@ -1,121 +1,142 @@
 // index.js
+
 import TelegramBot from 'node-telegram-bot-api';
 import { GoogleSpreadsheet } from 'google-spreadsheet';
-import express from 'express';
 import dotenv from 'dotenv';
-
 dotenv.config();
 
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
-const app = express();
-const port = process.env.PORT || 10000;
 
-// Настройка Google Sheets
 const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID);
-await doc.useServiceAccountAuth({
-  client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-  private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-});
-await doc.loadInfo();
-const sheet = doc.sheetsByTitle[process.env.SHEET_NAME];
 
-const users = {}; // Сессии пользователей
+const sessions = new Map();
+
+async function accessSheet() {
+  await doc.useServiceAccountAuth({
+    client_email: process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+    private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+  });
+  await doc.loadInfo();
+  const sheet = doc.sheetsByTitle[process.env.SHEET_NAME];
+  await sheet.loadHeaderRow();
+  return sheet;
+}
 
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
-  users[chatId] = { step: 'awaiting_name' };
+  sessions.set(chatId, {});
   await bot.sendMessage(chatId, 'Привет! Как тебя зовут?');
 });
 
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
-  const text = msg.text;
-
-  if (!users[chatId] || msg.text.startsWith('/start')) return;
-
-  const session = users[chatId];
-
-  if (session.step === 'awaiting_name') {
-    session.name = text;
-    session.step = 'awaiting_order';
-
-    const rows = await sheet.getRows();
-    const orders = [...new Set(rows.map(row => row['Заказ']))];
-
-    const buttons = orders.map((order) => ([{ text: `${order}`, callback_data: `order_${order}` }]));
-
-    await bot.sendMessage(chatId, 'Выберите заказ:', {
-      reply_markup: { inline_keyboard: buttons }
-    });
-  }
-});
-
-bot.on('callback_query', async (query) => {
-  const chatId = query.message.chat.id;
-  const data = query.data;
-  const session = users[chatId];
+  const session = sessions.get(chatId);
 
   if (!session) return;
 
-  if (data.startsWith('order_') && session.step === 'awaiting_order') {
-    const selectedOrder = data.split('order_')[1];
-    session.order = selectedOrder;
-    session.step = 'awaiting_form';
-
+  if (!session.name && msg.text && msg.text !== '/start') {
+    session.name = msg.text;
+    const sheet = await accessSheet();
     const rows = await sheet.getRows();
-    const formRows = rows.filter(row => row['Заказ'] == selectedOrder);
-    session.availableForms = formRows;
 
-    const buttons = formRows.map((row, index) => ([{
-      text: `${row['Форма']} (${row['Размер']})`,
-      callback_data: `form_${index}`
-    }]));
+    const uniqueOrders = [...new Set(rows.map(row => row['Заказ']))].filter(Boolean);
 
-    await bot.sendMessage(chatId, 'Выберите форму и размер:', {
-      reply_markup: { inline_keyboard: buttons }
+    session.allOrders = uniqueOrders;
+    await bot.sendMessage(chatId, 'Выберите заказ:', {
+      reply_markup: {
+        keyboard: uniqueOrders.map(order => [{ text: order }]),
+        resize_keyboard: true,
+        one_time_keyboard: true,
+      },
     });
   }
+  else if (session.name && !session.order && msg.text) {
+    session.order = msg.text;
+    const sheet = await accessSheet();
+    const rows = await sheet.getRows();
 
-  if (data.startsWith('form_') && session.step === 'awaiting_form') {
-    const formIndex = parseInt(data.split('form_')[1]);
-    const formRow = session.availableForms[formIndex];
-    session.formRow = formRow;
-    session.step = 'awaiting_quantity';
+    const shapesAndSizes = rows
+      .filter(row => row['Заказ'] == session.order && parseInt(row['Требуется еще']) > 0)
+      .map(row => `${row['Форма']} (${row['Размер']})`);
 
-    const maxQuantity = parseInt(formRow['Требуется еще']);
-    const buttons = [];
-    for (let i = 1; i <= maxQuantity; i++) {
-      buttons.push([{ text: `${i}`, callback_data: `qty_${i}` }]);
+    if (shapesAndSizes.length === 0) {
+      await bot.sendMessage(chatId, 'Все изделия по этому заказу уже сделаны. Попробуйте другой заказ.');
+      sessions.delete(chatId);
+      return;
     }
 
-    await bot.sendMessage(chatId, 'Сколько изделий сделано?', {
-      reply_markup: { inline_keyboard: buttons }
+    session.shapesAndSizes = shapesAndSizes;
+
+    await bot.sendMessage(chatId, 'Выберите форму и размер:', {
+      reply_markup: {
+        keyboard: shapesAndSizes.map(shape => [{ text: shape }]),
+        resize_keyboard: true,
+        one_time_keyboard: true,
+      },
     });
   }
+  else if (session.order && !session.shapeAndSize && msg.text) {
+    session.shapeAndSize = msg.text;
 
-  if (data.startsWith('qty_') && session.step === 'awaiting_quantity') {
-    const quantity = parseInt(data.split('qty_')[1]);
+    const sheet = await accessSheet();
+    const rows = await sheet.getRows();
+
+    const [shape, size] = session.shapeAndSize.split(' (');
+    const sizeClean = size?.replace(')', '');
+
+    const targetRow = rows.find(row => 
+      row['Заказ'] == session.order && 
+      row['Форма'] == shape && 
+      row['Размер'] == sizeClean
+    );
+
+    if (!targetRow) {
+      await bot.sendMessage(chatId, 'Не найдено сочетание заказа, формы и размера. Попробуйте сначала.');
+      sessions.delete(chatId);
+      return;
+    }
+
+    const requiredLeft = parseInt(targetRow['Требуется еще']);
+
+    if (!requiredLeft || requiredLeft <= 0) {
+      await bot.sendMessage(chatId, 'По этому изделию все уже сделано! Выберите другое.');
+      sessions.delete(chatId);
+      return;
+    }
+
+    session.targetRow = targetRow;
+    session.requiredLeft = requiredLeft;
+
+    const quantityOptions = Array.from({ length: requiredLeft }, (_, i) => (i + 1).toString());
+
+    await bot.sendMessage(chatId, 'Сколько изделий сделано?', {
+      reply_markup: {
+        keyboard: quantityOptions.map(q => [{ text: q }]),
+        resize_keyboard: true,
+        one_time_keyboard: true,
+      },
+    });
+  }
+  else if (session.shapeAndSize && !session.quantity && msg.text) {
+    const quantity = parseInt(msg.text);
+
+    if (isNaN(quantity) || quantity <= 0 || quantity > session.requiredLeft) {
+      await bot.sendMessage(chatId, `Введите число от 1 до ${session.requiredLeft}`);
+      return;
+    }
+
     session.quantity = quantity;
 
-    // Обновление Google Sheets
-    const formRow = session.formRow;
-    formRow['Сделано'] = quantity;
-    formRow['Исполнитель'] = session.name;
-    formRow['дата'] = new Date().toLocaleDateString('ru-RU');
-    await formRow.save();
+    // Обновляем только столбец 'Сделано'
+    const previousDone = parseInt(session.targetRow['Сделано']) || 0;
+    session.targetRow['Сделано'] = previousDone + quantity;
 
-    await bot.sendMessage(chatId, `✅ Ваш результат:
-Заказ: ${formRow['Заказ']}
-Форма: ${formRow['Форма']}
-Размер: ${formRow['Размер']}
-Сделано: ${quantity}`);
+    await session.targetRow.save();
 
-    delete users[chatId];
+    await bot.sendMessage(chatId, `✅ Ваш результат:\nЗаказ: ${session.order}\nФорма: ${session.targetRow['Форма']}\nРазмер: ${session.targetRow['Размер']}\nСделано: ${session.targetRow['Сделано']}`);
+
+    sessions.delete(chatId);
   }
-
-  await bot.answerCallbackQuery(query.id);
 });
 
-app.listen(port, () => {
-  console.log(`Сервер запущен на порту ${port}`);
-});
+console.log('Бот запущен...');
