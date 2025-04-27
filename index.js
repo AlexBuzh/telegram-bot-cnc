@@ -1,9 +1,11 @@
+// index.js
+
 const express = require('express');
 const bodyParser = require('body-parser');
 const axios = require('axios');
 const { google } = require('googleapis');
 
-const TOKEN = '7949948004:AAGmO4r9jJZNlhZwq8qrv8CX3sVq7-ZMDjg';
+const TOKEN = process.env.TELEGRAM_TOKEN;
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
 
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
@@ -67,7 +69,11 @@ async function handleUserInput(chatId, text) {
     user.step = 'chooseFormSize';
     const formsAndSizes = await getFormsAndSizes(user.order);
     if (formsAndSizes.length === 0) {
-      await sendMessage(chatId, "Формы и размеры не найдены для этого заказа. Попробуйте снова.");
+      await sendMessage(chatId, "Все позиции по этому заказу уже выполнены! \u{1F389} Выберите другой заказ.");
+      user.step = 'chooseOrder';
+      const orders = await getUniqueOrders();
+      const buttons = orders.map(order => [{ text: order, callback_data: order }]);
+      await sendMessage(chatId, "Выберите номер заказа:", buttons);
       return;
     }
     const buttons = formsAndSizes.map(item => [{ text: `${item.form} - ${item.size}`, callback_data: `${item.form}|${item.size}` }]);
@@ -80,12 +86,8 @@ async function handleUserInput(chatId, text) {
     await sendMessage(chatId, "Укажите количество:");
   } else if (user.step === 'askQuantity') {
     user.quantity = text;
-    const success = await writeToSheet(user);
-    if (success) {
-      await sendMessage(chatId, "✅ Данные записаны! Спасибо!");
-    } else {
-      await sendMessage(chatId, "❌ Ошибка при записи данных! Попробуйте снова позже.");
-    }
+    await writeToSheet(user);
+    await sendMessage(chatId, "\u2705 Данные записаны! Спасибо!");
     delete userState[chatId];
   }
 }
@@ -108,39 +110,36 @@ async function getUniqueOrders() {
 async function getFormsAndSizes(order) {
   const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: SHEET_NAME });
   const rows = res.data.values;
+
   return rows.slice(1)
     .filter(r => r[0] === order)
+    .filter(r => {
+      const required = parseInt(r[3], 10) || 0;
+      const done = parseInt(r[4], 10) || 0;
+      return done < required;
+    })
     .map(r => ({ form: r[1], size: r[2] }));
 }
 
 async function writeToSheet(user) {
-  try {
-    const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: SHEET_NAME });
-    const rows = res.data.values;
+  const res = await sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: SHEET_NAME });
+  const rows = res.data.values;
 
-    for (let i = 1; i < rows.length; i++) {
-      if (rows[i][0] === user.order && rows[i][1] === user.form && rows[i][2] === user.size) {
-        const range = `${SHEET_NAME}!E${i + 1}:G${i + 1}`;
-        const date = new Date();
-        const formattedDate = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
-        await sheets.spreadsheets.values.update({
-          spreadsheetId: SPREADSHEET_ID,
-          range: range,
-          valueInputOption: 'RAW',
-          requestBody: {
-            values: [[user.quantity, formattedDate, user.name]]
-          }
-        });
-        console.log(`✅ Данные успешно записаны в строку ${i + 1}`);
-        return true;
-      }
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i][0] === user.order && rows[i][1] === user.form && rows[i][2] === user.size) {
+      const range = `${SHEET_NAME}!E${i + 1}:G${i + 1}`;
+      const date = new Date();
+      const formattedDate = `${String(date.getDate()).padStart(2, '0')}/${String(date.getMonth() + 1).padStart(2, '0')}/${date.getFullYear()}`;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: range,
+        valueInputOption: 'RAW',
+        requestBody: {
+          values: [[user.quantity, formattedDate, user.name]]
+        }
+      });
+      return;
     }
-
-    console.error('❗Не найдена строка для записи данных.');
-    return false;
-  } catch (error) {
-    console.error('❌ Ошибка при записи в Google Sheets:', error.message);
-    return false;
   }
 }
 
