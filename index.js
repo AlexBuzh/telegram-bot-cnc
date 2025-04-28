@@ -13,7 +13,7 @@ const bot = new TelegramBot(process.env.BOT_TOKEN);
 const WEBHOOK_PATH = '/webhook';
 
 // Устанавливаем webhook
-const DOMAIN = 'https://e83232d2-70b7-4f97-9a29-70c7f7ef4c38.render.com'; // твой домен Render
+const DOMAIN = 'https://telegram-bot-cnc.onrender.com'; // твой домен Render
 bot.setWebHook(`${DOMAIN}${WEBHOOK_PATH}`);
 
 app.use(express.json());
