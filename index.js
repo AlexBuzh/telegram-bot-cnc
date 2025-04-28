@@ -11,9 +11,7 @@ const bot = new TelegramBot(process.env.BOT_TOKEN);
 
 // Webhook путь
 const WEBHOOK_PATH = '/webhook';
-
-// Устанавливаем webhook
-const DOMAIN = 'https://telegram-bot-cnc.onrender.com'; // твой домен Render
+const DOMAIN = 'https://telegram-bot-cnc.onrender.com';
 bot.setWebHook(`${DOMAIN}${WEBHOOK_PATH}`);
 
 app.use(express.json());
@@ -22,7 +20,7 @@ app.post(WEBHOOK_PATH, (req, res) => {
   res.sendStatus(200);
 });
 
-// Подключение к Google Sheets
+// Работа с Google Sheets
 const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID);
 const sessions = new Map();
 
@@ -37,13 +35,14 @@ async function accessSheet() {
   return sheet;
 }
 
-// Логика бота — БЕЗ изменений
+// Старт бота
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   sessions.set(chatId, {});
   await bot.sendMessage(chatId, 'Привет! Как тебя зовут?');
 });
 
+// Слушаем обычные текстовые сообщения
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const session = sessions.get(chatId);
@@ -60,14 +59,22 @@ bot.on('message', async (msg) => {
     session.allOrders = uniqueOrders;
     await bot.sendMessage(chatId, 'Выберите заказ:', {
       reply_markup: {
-        keyboard: uniqueOrders.map(order => [{ text: order }]),
-        resize_keyboard: true,
-        one_time_keyboard: true,
+        inline_keyboard: uniqueOrders.map(order => [{ text: order, callback_data: `order_${order}` }]),
       },
     });
   }
-  else if (session.name && !session.order && msg.text) {
-    session.order = msg.text;
+});
+
+// Обработка нажатий по inline-кнопкам
+bot.on('callback_query', async (callbackQuery) => {
+  const chatId = callbackQuery.message.chat.id;
+  const data = callbackQuery.data;
+  const session = sessions.get(chatId);
+
+  if (!session) return;
+
+  if (data.startsWith('order_')) {
+    session.order = data.replace('order_', '');
     const sheet = await accessSheet();
     const rows = await sheet.getRows();
 
@@ -85,14 +92,12 @@ bot.on('message', async (msg) => {
 
     await bot.sendMessage(chatId, 'Выберите форму и размер:', {
       reply_markup: {
-        keyboard: shapesAndSizes.map(shape => [{ text: shape }]),
-        resize_keyboard: true,
-        one_time_keyboard: true,
+        inline_keyboard: shapesAndSizes.map(shape => [{ text: shape, callback_data: `shape_${shape}` }]),
       },
     });
   }
-  else if (session.order && !session.shapeAndSize && msg.text) {
-    session.shapeAndSize = msg.text;
+  else if (data.startsWith('shape_')) {
+    session.shapeAndSize = data.replace('shape_', '');
 
     const sheet = await accessSheet();
     const rows = await sheet.getRows();
@@ -127,14 +132,12 @@ bot.on('message', async (msg) => {
 
     await bot.sendMessage(chatId, 'Сколько изделий сделано?', {
       reply_markup: {
-        keyboard: quantityOptions.map(q => [{ text: q }]),
-        resize_keyboard: true,
-        one_time_keyboard: true,
+        inline_keyboard: quantityOptions.map(q => [{ text: q, callback_data: `qty_${q}` }]),
       },
     });
   }
-  else if (session.shapeAndSize && !session.quantity && msg.text) {
-    const quantity = parseInt(msg.text);
+  else if (data.startsWith('qty_')) {
+    const quantity = parseInt(data.replace('qty_', ''));
 
     if (isNaN(quantity) || quantity <= 0 || quantity > session.requiredLeft) {
       await bot.sendMessage(chatId, `Введите число от 1 до ${session.requiredLeft}`);
@@ -152,6 +155,9 @@ bot.on('message', async (msg) => {
 
     sessions.delete(chatId);
   }
+
+  // Обязательно подтвердить callback_query, чтобы убрать "часики" в Telegram
+  await bot.answerCallbackQuery(callbackQuery.id);
 });
 
 const PORT = process.env.PORT || 3000;
