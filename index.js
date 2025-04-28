@@ -49,19 +49,7 @@ bot.on('message', async (msg) => {
 
   if (session.step === 'waiting_name' && msg.text && msg.text !== '/start') {
     session.name = msg.text;
-    const sheet = await accessSheet();
-    const rows = await sheet.getRows();
-
-    const uniqueOrders = [...new Set(rows.map(row => row['Заказ']))].filter(Boolean);
-
-    session.allOrders = uniqueOrders;
-    session.step = 'waiting_order';
-
-    await bot.sendMessage(chatId, 'Выберите заказ:', {
-      reply_markup: {
-        inline_keyboard: uniqueOrders.map(order => [{ text: order, callback_data: `order_${order}` }]),
-      },
-    });
+    await sendAvailableOrders(chatId, session);
   }
 });
 
@@ -83,8 +71,8 @@ bot.on('callback_query', async (callbackQuery) => {
       .map(row => `${row['Форма']} (${row['Размер']})`);
 
     if (shapesAndSizes.length === 0) {
-      await bot.sendMessage(chatId, 'Все изделия по этому заказу уже сделаны. Попробуйте другой заказ.');
-      sessions.delete(chatId);
+      await bot.sendMessage(chatId, 'Все изделия по этому заказу уже сделаны. Пожалуйста, выберите другой заказ.');
+      await sendAvailableOrders(chatId, session);
       return;
     }
 
@@ -114,7 +102,7 @@ bot.on('callback_query', async (callbackQuery) => {
 
     if (!targetRow) {
       await bot.sendMessage(chatId, 'Не найдено сочетание заказа, формы и размера. Попробуйте сначала.');
-      sessions.delete(chatId);
+      await sendAvailableOrders(chatId, session);
       return;
     }
 
@@ -122,7 +110,7 @@ bot.on('callback_query', async (callbackQuery) => {
 
     if (!requiredLeft || requiredLeft <= 0) {
       await bot.sendMessage(chatId, 'По этому изделию все уже сделано! Выберите другое.');
-      sessions.delete(chatId);
+      await sendAvailableOrders(chatId, session);
       return;
     }
 
@@ -157,7 +145,7 @@ bot.on('callback_query', async (callbackQuery) => {
     session.targetRow['дата'] = formattedDate;
     session.targetRow['Исполнитель'] = session.name;
 
-    // Теперь считаем "Требуется еще" вручную:
+    // Пересчет "Требуется еще"
     const required = parseInt(session.targetRow['Требуется']) || 0;
     const done = parseInt(session.targetRow['Сделано']) || 0;
     session.targetRow['Требуется еще'] = required - done > 0 ? required - done : 0;
@@ -178,27 +166,42 @@ bot.on('callback_query', async (callbackQuery) => {
     });
   }
   else if (data === 'new_yes') {
-    const sheet = await accessSheet();
-    const rows = await sheet.getRows();
-
-    const uniqueOrders = [...new Set(rows.map(row => row['Заказ']))].filter(Boolean);
-
-    session.allOrders = uniqueOrders;
-    session.step = 'waiting_order';
-
-    await bot.sendMessage(chatId, 'Выберите заказ:', {
-      reply_markup: {
-        inline_keyboard: uniqueOrders.map(order => [{ text: order, callback_data: `order_${order}` }]),
-      },
-    });
+    await sendAvailableOrders(chatId, session);
   }
   else if (data === 'new_no') {
-    await bot.sendMessage(chatId, 'Спасибо за работу! Хорошего дня!');
+    await bot.sendMessage(chatId, 'Спасибо за работу! Чтобы начать заново, отправьте /start.');
     sessions.delete(chatId);
   }
 
   await bot.answerCallbackQuery(callbackQuery.id);
 });
+
+// Функция отправки доступных заказов
+async function sendAvailableOrders(chatId, session) {
+  const sheet = await accessSheet();
+  const rows = await sheet.getRows();
+
+  const uniqueOrders = [...new Set(
+    rows
+      .filter(row => parseInt(row['Требуется еще']) > 0)
+      .map(row => row['Заказ'])
+  )].filter(Boolean);
+
+  if (uniqueOrders.length === 0) {
+    await bot.sendMessage(chatId, 'Нет доступных заказов. Все изделия уже сделаны!');
+    sessions.delete(chatId);
+    return;
+  }
+
+  session.allOrders = uniqueOrders;
+  session.step = 'waiting_order';
+
+  await bot.sendMessage(chatId, 'Выберите заказ:', {
+    reply_markup: {
+      inline_keyboard: uniqueOrders.map(order => [{ text: order, callback_data: `order_${order}` }]),
+    },
+  });
+}
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
