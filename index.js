@@ -9,7 +9,6 @@ dotenv.config();
 const app = express();
 const bot = new TelegramBot(process.env.BOT_TOKEN);
 
-// Webhook путь
 const WEBHOOK_PATH = '/webhook';
 const DOMAIN = 'https://telegram-bot-cnc.onrender.com';
 bot.setWebHook(`${DOMAIN}${WEBHOOK_PATH}`);
@@ -20,7 +19,6 @@ app.post(WEBHOOK_PATH, (req, res) => {
   res.sendStatus(200);
 });
 
-// Работа с Google Sheets
 const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID);
 const sessions = new Map();
 
@@ -38,18 +36,18 @@ async function accessSheet() {
 // Старт бота
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
-  sessions.set(chatId, {});
+  sessions.set(chatId, { step: 'waiting_name' });
   await bot.sendMessage(chatId, 'Привет! Как тебя зовут?');
 });
 
-// Слушаем обычные текстовые сообщения
+// Принимаем только имя вручную
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const session = sessions.get(chatId);
 
   if (!session) return;
 
-  if (!session.name && msg.text && msg.text !== '/start') {
+  if (session.step === 'waiting_name' && msg.text && msg.text !== '/start') {
     session.name = msg.text;
     const sheet = await accessSheet();
     const rows = await sheet.getRows();
@@ -57,6 +55,8 @@ bot.on('message', async (msg) => {
     const uniqueOrders = [...new Set(rows.map(row => row['Заказ']))].filter(Boolean);
 
     session.allOrders = uniqueOrders;
+    session.step = 'waiting_order';
+
     await bot.sendMessage(chatId, 'Выберите заказ:', {
       reply_markup: {
         inline_keyboard: uniqueOrders.map(order => [{ text: order, callback_data: `order_${order}` }]),
@@ -65,7 +65,7 @@ bot.on('message', async (msg) => {
   }
 });
 
-// Обработка нажатий по inline-кнопкам
+// Обрабатываем только нажатия на кнопки
 bot.on('callback_query', async (callbackQuery) => {
   const chatId = callbackQuery.message.chat.id;
   const data = callbackQuery.data;
@@ -89,6 +89,7 @@ bot.on('callback_query', async (callbackQuery) => {
     }
 
     session.shapesAndSizes = shapesAndSizes;
+    session.step = 'waiting_shape_size';
 
     await bot.sendMessage(chatId, 'Выберите форму и размер:', {
       reply_markup: {
@@ -127,6 +128,7 @@ bot.on('callback_query', async (callbackQuery) => {
 
     session.targetRow = targetRow;
     session.requiredLeft = requiredLeft;
+    session.step = 'waiting_quantity';
 
     const quantityOptions = Array.from({ length: requiredLeft }, (_, i) => (i + 1).toString());
 
@@ -149,14 +151,49 @@ bot.on('callback_query', async (callbackQuery) => {
     const previousDone = parseInt(session.targetRow['Сделано']) || 0;
     session.targetRow['Сделано'] = previousDone + quantity;
 
+    // Пишем имя и дату
+    session.targetRow['Кто сделал'] = session.name;
+
+    const today = new Date();
+    const formattedDate = today.toLocaleDateString('ru-RU'); // формат дд.мм.гггг
+    session.targetRow['Дата'] = formattedDate;
+
     await session.targetRow.save();
 
-    await bot.sendMessage(chatId, `✅ Ваш результат:\nЗаказ: ${session.order}\nФорма: ${session.targetRow['Форма']}\nРазмер: ${session.targetRow['Размер']}\nСделано: ${session.targetRow['Сделано']}`);
+    await bot.sendMessage(chatId, `✅ Ваш результат:\nИмя: ${session.name}\nЗаказ: ${session.order}\nФорма: ${session.targetRow['Форма']}\nРазмер: ${session.targetRow['Размер']}\nСделано: ${session.targetRow['Сделано']}\nДата: ${formattedDate}`);
 
+    // Спрашиваем про новый заказ
+    session.step = 'waiting_new_order';
+
+    await bot.sendMessage(chatId, 'Хотите внести ещё один заказ?', {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: 'Да', callback_data: 'new_yes' }],
+          [{ text: 'Нет', callback_data: 'new_no' }],
+        ],
+      },
+    });
+  }
+  else if (data === 'new_yes') {
+    const sheet = await accessSheet();
+    const rows = await sheet.getRows();
+
+    const uniqueOrders = [...new Set(rows.map(row => row['Заказ']))].filter(Boolean);
+
+    session.allOrders = uniqueOrders;
+    session.step = 'waiting_order';
+
+    await bot.sendMessage(chatId, 'Выберите заказ:', {
+      reply_markup: {
+        inline_keyboard: uniqueOrders.map(order => [{ text: order, callback_data: `order_${order}` }]),
+      },
+    });
+  }
+  else if (data === 'new_no') {
+    await bot.sendMessage(chatId, 'Спасибо за работу! Хорошего дня!');
     sessions.delete(chatId);
   }
 
-  // Обязательно подтвердить callback_query, чтобы убрать "часики" в Telegram
   await bot.answerCallbackQuery(callbackQuery.id);
 });
 
