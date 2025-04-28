@@ -40,7 +40,7 @@ bot.onText(/\/start/, async (msg) => {
   await bot.sendMessage(chatId, 'Привет! Как тебя зовут?');
 });
 
-// Принимаем только имя вручную
+// Принимаем только имя
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
   const session = sessions.get(chatId);
@@ -65,7 +65,7 @@ bot.on('message', async (msg) => {
   }
 });
 
-// Обрабатываем только кнопки (inline_keyboard)
+// Работаем только с кнопками
 bot.on('callback_query', async (callbackQuery) => {
   const chatId = callbackQuery.message.chat.id;
   const data = callbackQuery.data;
@@ -152,17 +152,16 @@ bot.on('callback_query', async (callbackQuery) => {
     session.targetRow['Сделано'] = previousDone + quantity;
 
     const today = new Date();
-    const formattedDate = today.toLocaleDateString('ru-RU'); // формат дд.мм.гггг
+    const formattedDate = today.toLocaleDateString('ru-RU');
 
-    session.targetRow['Кто сделал'] = session.name;
-    session.targetRow['Дата'] = formattedDate;
+    // Обновляем нужные поля вручную
+    session.targetRow['дата'] = formattedDate;
+    session.targetRow['Исполнитель'] = session.name;
 
-    // Сохраняем только нужные поля, чтобы формула в столбце E не сломалась!
-    await session.targetRow.saveFields(['Сделано', 'Кто сделал', 'Дата']);
+    await session.targetRow.save(); // Только save(), без saveFields()
 
     await bot.sendMessage(chatId, `✅ Ваш результат:\nИмя: ${session.name}\nЗаказ: ${session.order}\nФорма: ${session.targetRow['Форма']}\nРазмер: ${session.targetRow['Размер']}\nСделано: ${session.targetRow['Сделано']}\nДата: ${formattedDate}`);
 
-    // Спрашиваем, внести ли ещё заказ
     session.step = 'waiting_new_order';
 
     await bot.sendMessage(chatId, 'Хотите внести ещё один заказ?', {
