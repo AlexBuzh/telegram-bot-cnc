@@ -65,7 +65,7 @@ bot.on('message', async (msg) => {
   }
 });
 
-// Обрабатываем только нажатия на кнопки
+// Обрабатываем только кнопки (inline_keyboard)
 bot.on('callback_query', async (callbackQuery) => {
   const chatId = callbackQuery.message.chat.id;
   const data = callbackQuery.data;
@@ -151,18 +151,18 @@ bot.on('callback_query', async (callbackQuery) => {
     const previousDone = parseInt(session.targetRow['Сделано']) || 0;
     session.targetRow['Сделано'] = previousDone + quantity;
 
-    // Пишем имя и дату
-    session.targetRow['Кто сделал'] = session.name;
-
     const today = new Date();
     const formattedDate = today.toLocaleDateString('ru-RU'); // формат дд.мм.гггг
+
+    session.targetRow['Кто сделал'] = session.name;
     session.targetRow['Дата'] = formattedDate;
 
-    await session.targetRow.save();
+    // Сохраняем только нужные поля, чтобы формула в столбце E не сломалась!
+    await session.targetRow.saveFields(['Сделано', 'Кто сделал', 'Дата']);
 
     await bot.sendMessage(chatId, `✅ Ваш результат:\nИмя: ${session.name}\nЗаказ: ${session.order}\nФорма: ${session.targetRow['Форма']}\nРазмер: ${session.targetRow['Размер']}\nСделано: ${session.targetRow['Сделано']}\nДата: ${formattedDate}`);
 
-    // Спрашиваем про новый заказ
+    // Спрашиваем, внести ли ещё заказ
     session.step = 'waiting_new_order';
 
     await bot.sendMessage(chatId, 'Хотите внести ещё один заказ?', {
