@@ -3,12 +3,27 @@
 import TelegramBot from 'node-telegram-bot-api';
 import { GoogleSpreadsheet } from 'google-spreadsheet';
 import dotenv from 'dotenv';
+import express from 'express';
 dotenv.config();
 
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+const app = express();
+const bot = new TelegramBot(process.env.BOT_TOKEN);
 
+// Webhook путь
+const WEBHOOK_PATH = '/webhook';
+
+// Устанавливаем webhook
+const DOMAIN = 'https://e83232d2-70b7-4f97-9a29-70c7f7ef4c38.render.com'; // твой домен Render
+bot.setWebHook(`${DOMAIN}${WEBHOOK_PATH}`);
+
+app.use(express.json());
+app.post(WEBHOOK_PATH, (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
+});
+
+// Подключение к Google Sheets
 const doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID);
-
 const sessions = new Map();
 
 async function accessSheet() {
@@ -22,6 +37,7 @@ async function accessSheet() {
   return sheet;
 }
 
+// Логика бота — БЕЗ изменений
 bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   sessions.set(chatId, {});
@@ -127,7 +143,6 @@ bot.on('message', async (msg) => {
 
     session.quantity = quantity;
 
-    // Обновляем только столбец 'Сделано'
     const previousDone = parseInt(session.targetRow['Сделано']) || 0;
     session.targetRow['Сделано'] = previousDone + quantity;
 
@@ -139,4 +154,7 @@ bot.on('message', async (msg) => {
   }
 });
 
-console.log('Бот запущен...');
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Сервер запущен на порту ${PORT}`);
+});
