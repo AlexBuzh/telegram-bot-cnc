@@ -154,11 +154,15 @@ bot.on('callback_query', async (callbackQuery) => {
     const today = new Date();
     const formattedDate = today.toLocaleDateString('ru-RU');
 
-    // Обновляем нужные поля вручную
     session.targetRow['дата'] = formattedDate;
     session.targetRow['Исполнитель'] = session.name;
 
-    await session.targetRow.save(); // Только save(), без saveFields()
+    // Теперь считаем "Требуется еще" вручную:
+    const required = parseInt(session.targetRow['Требуется']) || 0;
+    const done = parseInt(session.targetRow['Сделано']) || 0;
+    session.targetRow['Требуется еще'] = required - done > 0 ? required - done : 0;
+
+    await session.targetRow.save();
 
     await bot.sendMessage(chatId, `✅ Ваш результат:\nИмя: ${session.name}\nЗаказ: ${session.order}\nФорма: ${session.targetRow['Форма']}\nРазмер: ${session.targetRow['Размер']}\nСделано: ${session.targetRow['Сделано']}\nДата: ${formattedDate}`);
 
